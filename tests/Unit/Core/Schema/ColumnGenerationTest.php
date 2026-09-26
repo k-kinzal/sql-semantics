@@ -10,10 +10,14 @@ use PHPUnit\Framework\TestCase;
 use SqlSemantics\Core\Binder;
 use SqlSemantics\Core\SchemaBuilder;
 use SqlSemantics\Core\SemanticException;
-use SqlSemantics\Core\Type\Nullability;
+use SqlSemantics\Facade\Schema;
 use SqlSemantics\Platform\PostgreSql\Dialect as PostgreSqlDialect;
+use SqlSemantics\Platform\Sqlite\Dialect as SqliteDialect;
+use SqlSemantics\Statement\Writer;
 
-#[CoversClass(\SqlSemantics\Core\Schema\ColumnDefinition::class)]
+#[CoversClass(Binder::class)]
+#[CoversClass(SchemaBuilder::class)]
+#[CoversClass(\SqlSemantics\Core\Ast\DialectParser::class)]
 #[CoversClass(\SqlSemantics\Core\Binding\ExpressionBinder::class)]
 #[CoversClass(\SqlSemantics\Core\Binding\ExpressionRules::class)]
 #[CoversClass(\SqlSemantics\Core\Binding\FromBinder::class)]
@@ -24,9 +28,6 @@ use SqlSemantics\Platform\PostgreSql\Dialect as PostgreSqlDialect;
 #[CoversClass(\SqlSemantics\Core\Binding\SyntaxGuard::class)]
 #[CoversClass(\SqlSemantics\Core\Binding\SelectModifiersBinder::class)]
 #[CoversClass(\SqlSemantics\Core\Binding\TypeResolution::class)]
-#[CoversClass(Binder::class)]
-#[CoversClass(SchemaBuilder::class)]
-#[CoversClass(\SqlSemantics\Core\Ast\DialectParser::class)]
 #[CoversClass(\SqlSemantics\Core\Ast\ColumnReader::class)]
 #[CoversClass(\SqlSemantics\Core\Ast\ConstraintReader::class)]
 #[CoversClass(\SqlSemantics\Core\Ast\Identifiers::class)]
@@ -47,6 +48,7 @@ use SqlSemantics\Platform\PostgreSql\Dialect as PostgreSqlDialect;
 #[CoversClass(\SqlSemantics\Core\Model\BoundSelect::class)]
 #[CoversClass(\SqlSemantics\Core\Model\TableUse::class)]
 #[CoversClass(\SqlSemantics\Core\Schema::class)]
+#[CoversClass(\SqlSemantics\Core\Schema\ColumnDefinition::class)]
 #[CoversClass(\SqlSemantics\Core\Schema\TableConstraint::class)]
 #[CoversClass(\SqlSemantics\Core\Schema\TableDefinition::class)]
 #[CoversClass(SemanticException::class)]
@@ -68,25 +70,32 @@ use SqlSemantics\Platform\PostgreSql\Dialect as PostgreSqlDialect;
 #[\PHPUnit\Framework\Attributes\UsesClass(\SqlSemantics\Platform\MySql\NameRules::class)]
 #[\PHPUnit\Framework\Attributes\UsesClass(\SqlSemantics\Platform\MySql\SchemaRules::class)]
 #[Medium]
-final class ColumnDefinitionTest extends TestCase
+#[CoversClass(\SqlSemantics\Core\Analysis\SchemaAnalyzer::class)]
+#[CoversClass(\SqlSemantics\Core\Analysis\ValueReader::class)]
+#[CoversClass(\SqlSemantics\Core\Ast\ColumnProperties::class)]
+#[CoversClass(\SqlSemantics\Core\Ast\SchemaChanges::class)]
+#[CoversClass(\SqlSemantics\Core\Schema\ColumnGeneration::class)]
+#[CoversClass(\SqlSemantics\Core\Schema\Invariant::class)]
+#[CoversClass(Schema::class)]
+#[CoversClass(\SqlSemantics\Statement\ImmutableGraph::class)]
+#[CoversClass(Writer::class)]
+#[CoversClass(\SqlSemantics\Statement\Assertion::class)]
+final class ColumnGenerationTest extends TestCase
 {
-    public function testKeepsDefaultsAsOriginalSyntax(): void
+    public function testIdentityKeepsItsOptionsWithoutAComputation(): void
     {
-        $column = (new SchemaBuilder(PostgreSqlDialect::PostgreSql))->build('CREATE TABLE users (score INTEGER DEFAULT 42)')->tables[0]->columns[0];
-        self::assertSame(Nullability::MaybeNull, $column->nullability);
-        self::assertNotNull($column->defaultExpression);
-        self::assertSame('DEFAULT 42', trim(\SqlSemantics\Statement\Writer::render($column->defaultExpression)));
+        $column = (new Schema(PostgreSqlDialect::PostgreSql))->analyze('CREATE TABLE t (id INT GENERATED ALWAYS AS IDENTITY (START WITH 10))')->tables[0]->columns[0];
+        self::assertNotNull($column->generation);
+        self::assertSame('identity', $column->generation->kind->value);
+        self::assertNull($column->generation->expression);
+        self::assertStringContainsString('START WITH 10', Writer::render($column->generation->clause));
     }
 
-    public function testWithNullabilityPreservesAllTypedAttributes(): void
+    public function testComputedGenerationKeepsAnIndependentExpression(): void
     {
-        $column = (new \SqlSemantics\Facade\Schema(PostgreSqlDialect::PostgreSql))->analyze('CREATE TABLE t (label TEXT COLLATE "C" DEFAULT \'hello\')')->tables[0]->columns[0];
-        $refined = $column->withNullability(Nullability::NotNull);
-        self::assertSame(Nullability::MaybeNull, $column->nullability);
-        self::assertSame(Nullability::NotNull, $refined->nullability);
-        self::assertSame($column->attributes, $refined->attributes);
-        self::assertSame($column->collation, $refined->collation);
-        self::assertSame($column->defaultExpression, $refined->defaultExpression);
+        $column = (new Schema(SqliteDialect::Sqlite))->analyze('CREATE TABLE t (id INT, x INT AS (id * 2) STORED)')->tables[0]->columns[1];
+        self::assertNotNull($column->generation);
+        self::assertNotNull($column->generation->expression);
+        self::assertSame('id * 2', Writer::render($column->generation->expression));
     }
-
 }

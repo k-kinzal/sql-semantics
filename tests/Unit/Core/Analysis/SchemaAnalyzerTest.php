@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace Tests\Unit\Core\Schema;
+namespace Tests\Unit\Core\Analysis;
 
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\Medium;
@@ -10,10 +10,14 @@ use PHPUnit\Framework\TestCase;
 use SqlSemantics\Core\Binder;
 use SqlSemantics\Core\SchemaBuilder;
 use SqlSemantics\Core\SemanticException;
-use SqlSemantics\Core\Type\Nullability;
+use SqlSemantics\Facade\Schema;
+use SqlSemantics\Platform\MySql\Dialect as MySqlDialect;
 use SqlSemantics\Platform\PostgreSql\Dialect as PostgreSqlDialect;
+use SqlSemantics\Statement\Writer;
 
-#[CoversClass(\SqlSemantics\Core\Schema\ColumnDefinition::class)]
+#[CoversClass(Binder::class)]
+#[CoversClass(SchemaBuilder::class)]
+#[CoversClass(\SqlSemantics\Core\Ast\DialectParser::class)]
 #[CoversClass(\SqlSemantics\Core\Binding\ExpressionBinder::class)]
 #[CoversClass(\SqlSemantics\Core\Binding\ExpressionRules::class)]
 #[CoversClass(\SqlSemantics\Core\Binding\FromBinder::class)]
@@ -24,9 +28,6 @@ use SqlSemantics\Platform\PostgreSql\Dialect as PostgreSqlDialect;
 #[CoversClass(\SqlSemantics\Core\Binding\SyntaxGuard::class)]
 #[CoversClass(\SqlSemantics\Core\Binding\SelectModifiersBinder::class)]
 #[CoversClass(\SqlSemantics\Core\Binding\TypeResolution::class)]
-#[CoversClass(Binder::class)]
-#[CoversClass(SchemaBuilder::class)]
-#[CoversClass(\SqlSemantics\Core\Ast\DialectParser::class)]
 #[CoversClass(\SqlSemantics\Core\Ast\ColumnReader::class)]
 #[CoversClass(\SqlSemantics\Core\Ast\ConstraintReader::class)]
 #[CoversClass(\SqlSemantics\Core\Ast\Identifiers::class)]
@@ -47,6 +48,7 @@ use SqlSemantics\Platform\PostgreSql\Dialect as PostgreSqlDialect;
 #[CoversClass(\SqlSemantics\Core\Model\BoundSelect::class)]
 #[CoversClass(\SqlSemantics\Core\Model\TableUse::class)]
 #[CoversClass(\SqlSemantics\Core\Schema::class)]
+#[CoversClass(\SqlSemantics\Core\Schema\ColumnDefinition::class)]
 #[CoversClass(\SqlSemantics\Core\Schema\TableConstraint::class)]
 #[CoversClass(\SqlSemantics\Core\Schema\TableDefinition::class)]
 #[CoversClass(SemanticException::class)]
@@ -68,25 +70,42 @@ use SqlSemantics\Platform\PostgreSql\Dialect as PostgreSqlDialect;
 #[\PHPUnit\Framework\Attributes\UsesClass(\SqlSemantics\Platform\MySql\NameRules::class)]
 #[\PHPUnit\Framework\Attributes\UsesClass(\SqlSemantics\Platform\MySql\SchemaRules::class)]
 #[Medium]
-final class ColumnDefinitionTest extends TestCase
+#[CoversClass(\SqlSemantics\Core\Analysis\SchemaAnalyzer::class)]
+#[CoversClass(\SqlSemantics\Core\Analysis\ValueReader::class)]
+#[CoversClass(\SqlSemantics\Core\Ast\ColumnProperties::class)]
+#[CoversClass(\SqlSemantics\Core\Ast\SchemaChanges::class)]
+#[CoversClass(\SqlSemantics\Core\Schema\ColumnGeneration::class)]
+#[CoversClass(\SqlSemantics\Core\Schema\Invariant::class)]
+#[CoversClass(Schema::class)]
+#[CoversClass(\SqlSemantics\Statement\ImmutableGraph::class)]
+#[CoversClass(Writer::class)]
+#[CoversClass(\SqlSemantics\Statement\Assertion::class)]
+final class SchemaAnalyzerTest extends TestCase
 {
-    public function testKeepsDefaultsAsOriginalSyntax(): void
+    public function testAnalyzeUsesTheSelectedGrammarForState(): void
     {
-        $column = (new SchemaBuilder(PostgreSqlDialect::PostgreSql))->build('CREATE TABLE users (score INTEGER DEFAULT 42)')->tables[0]->columns[0];
-        self::assertSame(Nullability::MaybeNull, $column->nullability);
-        self::assertNotNull($column->defaultExpression);
-        self::assertSame('DEFAULT 42', trim(\SqlSemantics\Statement\Writer::render($column->defaultExpression)));
+        $reader = new \SqlSemantics\Core\Analysis\SchemaAnalyzer(MySqlDialect::MySql, grammarVersion: 'mysql-8.0.44');
+        $state = $reader->analyze('CREATE TABLE t (id INT) ENGINE=InnoDB');
+        self::assertSame('mysql-8.0.44', $state->grammarVersion);
+        self::assertSame('integer', $state->tables[0]->columns[0]->type->name);
     }
 
-    public function testWithNullabilityPreservesAllTypedAttributes(): void
+    public function testReadPreservesCompatibilitySyntaxErrors(): void
     {
-        $column = (new \SqlSemantics\Facade\Schema(PostgreSqlDialect::PostgreSql))->analyze('CREATE TABLE t (label TEXT COLLATE "C" DEFAULT \'hello\')')->tables[0]->columns[0];
-        $refined = $column->withNullability(Nullability::NotNull);
-        self::assertSame(Nullability::MaybeNull, $column->nullability);
-        self::assertSame(Nullability::NotNull, $refined->nullability);
-        self::assertSame($column->attributes, $refined->attributes);
-        self::assertSame($column->collation, $refined->collation);
-        self::assertSame($column->defaultExpression, $refined->defaultExpression);
+        $this->expectException(\SqlParser\Parser\SyntaxException::class);
+        (new \SqlSemantics\Core\Analysis\SchemaAnalyzer(PostgreSqlDialect::PostgreSql))->read('CREATE TABLE');
+    }
+
+
+    #[\PHPUnit\Framework\Attributes\TestWith(['mysql-5.6.51'])]
+    #[\PHPUnit\Framework\Attributes\TestWith(['mysql-5.7.44'])]
+    public function testAnalyzeLegacyStateUsesVersionedModels(string $version): void
+    {
+        $state = (new Schema(MySqlDialect::MySql, grammarVersion: $version))->analyze('CREATE TABLE t (id INT PRIMARY KEY, label VARCHAR(10) COLLATE utf8_bin) ENGINE=InnoDB');
+        self::assertSame($version, $state->grammarVersion);
+        self::assertSame(['id', 'label'], array_column($state->tables[0]->columns, 'name'));
+        self::assertNotNull($state->tables[0]->columns[1]->collation);
+        self::assertSame('COLLATE utf8_bin', Writer::render($state->tables[0]->columns[1]->collation));
     }
 
 }

@@ -2,18 +2,25 @@
 
 declare(strict_types=1);
 
-namespace Tests\Unit\Core\Schema;
+namespace Tests\Unit\Core\Ast;
 
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\Medium;
+use PHPUnit\Framework\Attributes\TestWith;
 use PHPUnit\Framework\TestCase;
 use SqlSemantics\Core\Binder;
+use SqlSemantics\Core\Dialect;
 use SqlSemantics\Core\SchemaBuilder;
 use SqlSemantics\Core\SemanticException;
-use SqlSemantics\Core\Type\Nullability;
+use SqlSemantics\Facade\Schema;
+use SqlSemantics\Platform\MySql\Dialect as MySqlDialect;
 use SqlSemantics\Platform\PostgreSql\Dialect as PostgreSqlDialect;
+use SqlSemantics\Platform\Sqlite\Dialect as SqliteDialect;
+use SqlSemantics\Statement\Writer;
 
-#[CoversClass(\SqlSemantics\Core\Schema\ColumnDefinition::class)]
+#[CoversClass(Binder::class)]
+#[CoversClass(SchemaBuilder::class)]
+#[CoversClass(\SqlSemantics\Core\Ast\DialectParser::class)]
 #[CoversClass(\SqlSemantics\Core\Binding\ExpressionBinder::class)]
 #[CoversClass(\SqlSemantics\Core\Binding\ExpressionRules::class)]
 #[CoversClass(\SqlSemantics\Core\Binding\FromBinder::class)]
@@ -24,9 +31,6 @@ use SqlSemantics\Platform\PostgreSql\Dialect as PostgreSqlDialect;
 #[CoversClass(\SqlSemantics\Core\Binding\SyntaxGuard::class)]
 #[CoversClass(\SqlSemantics\Core\Binding\SelectModifiersBinder::class)]
 #[CoversClass(\SqlSemantics\Core\Binding\TypeResolution::class)]
-#[CoversClass(Binder::class)]
-#[CoversClass(SchemaBuilder::class)]
-#[CoversClass(\SqlSemantics\Core\Ast\DialectParser::class)]
 #[CoversClass(\SqlSemantics\Core\Ast\ColumnReader::class)]
 #[CoversClass(\SqlSemantics\Core\Ast\ConstraintReader::class)]
 #[CoversClass(\SqlSemantics\Core\Ast\Identifiers::class)]
@@ -47,6 +51,7 @@ use SqlSemantics\Platform\PostgreSql\Dialect as PostgreSqlDialect;
 #[CoversClass(\SqlSemantics\Core\Model\BoundSelect::class)]
 #[CoversClass(\SqlSemantics\Core\Model\TableUse::class)]
 #[CoversClass(\SqlSemantics\Core\Schema::class)]
+#[CoversClass(\SqlSemantics\Core\Schema\ColumnDefinition::class)]
 #[CoversClass(\SqlSemantics\Core\Schema\TableConstraint::class)]
 #[CoversClass(\SqlSemantics\Core\Schema\TableDefinition::class)]
 #[CoversClass(SemanticException::class)]
@@ -68,25 +73,51 @@ use SqlSemantics\Platform\PostgreSql\Dialect as PostgreSqlDialect;
 #[\PHPUnit\Framework\Attributes\UsesClass(\SqlSemantics\Platform\MySql\NameRules::class)]
 #[\PHPUnit\Framework\Attributes\UsesClass(\SqlSemantics\Platform\MySql\SchemaRules::class)]
 #[Medium]
-final class ColumnDefinitionTest extends TestCase
+#[CoversClass(\SqlSemantics\Core\Analysis\SchemaAnalyzer::class)]
+#[CoversClass(\SqlSemantics\Core\Analysis\ValueReader::class)]
+#[CoversClass(\SqlSemantics\Core\Ast\ColumnProperties::class)]
+#[CoversClass(\SqlSemantics\Core\Ast\SchemaChanges::class)]
+#[CoversClass(\SqlSemantics\Core\Schema\ColumnGeneration::class)]
+#[CoversClass(\SqlSemantics\Core\Schema\Invariant::class)]
+#[CoversClass(Schema::class)]
+#[CoversClass(\SqlSemantics\Statement\ImmutableGraph::class)]
+#[CoversClass(Writer::class)]
+#[CoversClass(\SqlSemantics\Statement\Assertion::class)]
+final class SchemaChangesTest extends TestCase
 {
-    public function testKeepsDefaultsAsOriginalSyntax(): void
+    #[TestWith([MySqlDialect::MySql])]
+    #[TestWith([PostgreSqlDialect::PostgreSql])]
+    #[TestWith([SqliteDialect::Sqlite])]
+    public function testDropAppliesInDeclarationOrder(Dialect $dialect): void
     {
-        $column = (new SchemaBuilder(PostgreSqlDialect::PostgreSql))->build('CREATE TABLE users (score INTEGER DEFAULT 42)')->tables[0]->columns[0];
-        self::assertSame(Nullability::MaybeNull, $column->nullability);
-        self::assertNotNull($column->defaultExpression);
-        self::assertSame('DEFAULT 42', trim(\SqlSemantics\Statement\Writer::render($column->defaultExpression)));
+        $schema = (new Schema($dialect))->analyze('CREATE TABLE t (old_column INT); DROP TABLE t; CREATE TABLE t (new_column TEXT);');
+        self::assertSame(['new_column'], array_column($schema->tables[0]->columns, 'name'));
     }
 
-    public function testWithNullabilityPreservesAllTypedAttributes(): void
+    public function testDropRejectsMissingUnconditionalTargets(): void
     {
-        $column = (new \SqlSemantics\Facade\Schema(PostgreSqlDialect::PostgreSql))->analyze('CREATE TABLE t (label TEXT COLLATE "C" DEFAULT \'hello\')')->tables[0]->columns[0];
-        $refined = $column->withNullability(Nullability::NotNull);
-        self::assertSame(Nullability::MaybeNull, $column->nullability);
-        self::assertSame(Nullability::NotNull, $refined->nullability);
-        self::assertSame($column->attributes, $refined->attributes);
-        self::assertSame($column->collation, $refined->collation);
-        self::assertSame($column->defaultExpression, $refined->defaultExpression);
+        $this->expectException(SemanticException::class);
+        $this->expectExceptionMessage('Cannot drop');
+        (new Schema(PostgreSqlDialect::PostgreSql))->analyze('DROP TABLE absent');
+    }
+
+    public function testDropDoesNotRemoveAQualifiedNamesake(): void
+    {
+        $state = (new Schema(PostgreSqlDialect::PostgreSql))->analyze('CREATE TABLE public.t (id INT); CREATE TABLE app.t (id INT); DROP TABLE public.t;');
+        self::assertSame('app', $state->tables[0]->schema);
+    }
+
+    public function testDropHandlesMultipleTargetsAndConditionalCreation(): void
+    {
+        $state = (new Schema(PostgreSqlDialect::PostgreSql))->analyze('CREATE TABLE a (id INT); CREATE TABLE b (id INT); CREATE TABLE IF NOT EXISTS a (ignored TEXT); DROP TABLE a, b;');
+        self::assertSame([], $state->tables);
+    }
+
+    public function testDropRejectsUnresolvedCatalogQualification(): void
+    {
+        $this->expectException(SemanticException::class);
+        $this->expectExceptionMessage('three-part table name');
+        (new Schema(PostgreSqlDialect::PostgreSql))->analyze('CREATE TABLE public.t (id INT); DROP TABLE db.public.t;');
     }
 
 }
